@@ -22,13 +22,17 @@
 #include "Adafruit_MQTT/Adafruit_MQTT_SPARK.h"
 // #include "Adafruit_MQTT/Adafruit_MQTT.h"
 
-
 void setup();
 void loop();
-void MQTT_connect();
 void showTempDegree(void);
-String getAirQuality();
-#line 20 "c:/Users/gabi/Documents/IoT/FlowerPot_MidTerm/MidTerm_Flower/src/MidTerm_Flower.ino"
+void printMoisture(int _moistureReading);
+void publishMoisture(int _moistureReading);
+String getAirQuality(int _aqSensor);
+void MQTT_connect();
+void pumpON(int moistureReading, int buttonvalue);
+void pumpOff();
+void pingMQTT();
+#line 19 "c:/Users/gabi/Documents/IoT/FlowerPot_MidTerm/MidTerm_Flower/src/MidTerm_Flower.ino"
 #define AQS_PIN A0
 #define OLED_RESET D4
 AirQualitySensor aqSensor(AQS_PIN);
@@ -38,16 +42,16 @@ Adafruit_SSD1306 display(OLED_RESET);
 Adafruit_BMP280 bmp;
 const int DUST_SENSOR_PIN = D4;
 int moistPin = A2;
-int airPin =A0;
-int pumpPin =11;
+int airPin = A0;
+int pumpPin = 11;
 AirQualitySensor sensor(A0);
 const int SENSOR_READING_INTERVAL = 30000;
 const byte BMPADDRESS = 0x76;
 int val = 0;
 
 int quality = sensor.slope();
-int temp, pressure, humidity;
-
+int temp;
+int airQual;
 bool BmpStatus;
 const char DEGREE = 0xF8; // Decimal 248 = 0 xF8
 float tempC;
@@ -63,21 +67,23 @@ unsigned long lastInterval;
 unsigned long lowpulseoccupancy = 0;
 unsigned long last_lpo = 0;
 unsigned long duration;
+unsigned long startPumpTime;
 
+/************ Global State (you don't need to change this!) ***   ***************/
+TCPClient TheClient;
 
+// Setup the MQTT client class by passing in the WiFi client and MQTT server and login details.
+Adafruit_MQTT_SPARK mqtt(&TheClient, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
 
+/****************************** Feeds ***************************************/
+// Setup Feeds to publish or subscribe
+// Notice MQTT paths for AIO follow the form: <username>/feeds/<feedname>
+Adafruit_MQTT_Publish objDust = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/Dust");
+Adafruit_MQTT_Publish objSoilM = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/SoilMoisture");
+Adafruit_MQTT_Publish objRoomTemp = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/RoomTemp");
+Adafruit_MQTT_Publish objAirQ = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/AirQ");
 
-/************ Global State (you don't need to change this!) ***   ***************/ 
-TCPClient TheClient; 
-
-// Setup the MQTT client class by passing in the WiFi client and MQTT server and login details. 
-Adafruit_MQTT_SPARK mqtt(&TheClient,AIO_SERVER,AIO_SERVERPORT,AIO_USERNAME,AIO_KEY); 
-
-/****************************** Feeds ***************************************/ 
-// Setup Feeds to publish or subscribe 
-// Notice MQTT paths for AIO follow the form: <username>/feeds/<feedname> 
-Adafruit_MQTT_Publish objRandom= Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/temp");
-Adafruit_MQTT_Subscribe objButton = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/water");
+Adafruit_MQTT_Subscribe objPumpOn = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/OnOff");
 
 /************Declare Variables*************/
 unsigned long last, lastTime;
@@ -88,42 +94,42 @@ SYSTEM_MODE(SEMI_AUTOMATIC);
 void setup()
 {
   Serial.begin(9600);
-  pinMode(11,OUTPUT);
+  pinMode(11, OUTPUT);
 
- waitFor(Serial.isConnected, 15000); //wait for Serial Monitor to startup
+  waitFor(Serial.isConnected, 15000); //wait for Serial Monitor to startup
   //Connect to WiFi without going to Particle Cloud
   WiFi.connect();
-  while(WiFi.connecting()) {
+  while (WiFi.connecting())
+  {
     Serial.printf(".");
   }
 
   // Setup MQTT subscription for onoff feed.
-  mqtt.subscribe(&objButton);
+  mqtt.subscribe(&objPumpOn);
 
-
-   Serial.println("Waiting sensor to init...");
+  Serial.println("Waiting sensor to init...");
   delay(20000);
-  
-  if (sensor.init()) {
+
+  if (sensor.init())
+  {
     Serial.println("Sensor ready.");
   }
-  else {
+  else
+  {
     Serial.println("Sensor ERROR!");
   }
 
- if (aqSensor.init())
- {
-   Serial.println("Air Quality Sensor ready.");
- }
- else
- {
-   Serial.println("Air Quality Sensor ERROR!");
- }
+  if (aqSensor.init())
+  {
+    Serial.println("Air Quality Sensor ready.");
+  }
+  else
+  {
+    Serial.println("Air Quality Sensor ERROR!");
+  }
 
   pinMode(DUST_SENSOR_PIN, INPUT);
   lastInterval = millis();
-
-
 
   pinMode(moistPin, INPUT);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
@@ -148,27 +154,137 @@ void setup()
 
 void loop()
 {
-// Validate connected to MQTT Broker
+  // Validate connected to MQTT Broker
   MQTT_connect();
+  pingMQTT();
 
-  // Ping MQTT Broker every 2 minutes to keep connection alive
-  if ((millis()-last)>120000) {
-      Serial.printf("Pinging MQTT \n");
-      if(! mqtt.ping()) {
-        Serial.printf("Disconnecting \n");
-        mqtt.disconnect();
-      }
-      last = millis();
-  }
+  int soilReading=analogRead(moistPin);
 
-  // this is our 'wait for incoming subscription packets' busy subloop
+ 
+  int buttonvalue=0;
   Adafruit_MQTT_Subscribe *subscription;
-  while ((subscription = mqtt.readSubscription(1000))) {
-    if (subscription == &objButton) {
-      value2 = atoi((char *)objButton.lastread);
-          Serial.printf("Received %0.2f from Adafruit.io feed FeedNameB \n",value2);
+  while ((subscription = mqtt.readSubscription(1000)))
+  {
+    if (subscription == &objPumpOn)
+    {
+      buttonvalue = atoi((char *)objPumpOn.lastread);
+      Serial.printf("Received %i from Adafruit.io feed FeedNameB \n", buttonvalue);
+      pumpON(soilReading,buttonvalue);
     }
+  } 
+  pumpOff();
+
+  Serial.print("Sensor value: ");
+  Serial.println(sensor.getValue());
+
+  duration = pulseIn(DUST_SENSOR_PIN, LOW);
+  lowpulseoccupancy = lowpulseoccupancy + duration;
+
+  DateTime = Time.timeStr(); // Current Date and Time from Particle Time class
+  TimeOnly = DateTime.substring(11, 19);
+
+  tempC = bmp.readTemperature();
+  tempF = (tempC * 9.0 / 5.0) + 32;
+
+  //Publish data
+  if ((millis() - lastTime > 10000))
+  {
+    if (mqtt.Update())
+    {
+      objRoomTemp.publish(tempF);
+      Serial.printf("Publishing Temp %0.2f\n", tempF);
+      publishMoisture(soilReading);
+      objDust.publish(concentration);
+      objAirQ.publish(airQual);
+      Serial.printf("Publishing quality %i\n", quality);
+    }
+    lastTime = millis();
+  
+
   }
+  
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.setTextSize(2);
+  display.setTextColor(WHITE);
+  display.printf("%s\n", TimeOnly.c_str());
+  display.display();
+
+  showTempDegree();
+  
+  }
+  
+void showTempDegree(void)
+{
+
+  
+  
+  display.setTextSize(2);
+  display.setTextColor(WHITE);
+  display.setRotation(0);
+  display.setCursor(2, 2);
+  display.printf("%0.1f%c", tempF, DEGREE);
+  display.display();
+
+  
+}
+
+void printMoisture(int _moistureReading)
+{
+
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(WHITE);
+  display.setRotation(0);
+  display.setCursor(3, 3);
+  display.printf("Soil Moisture %i\n", _moistureReading);
+  display.display();
+  display.clearDisplay();
+}
+
+void publishMoisture(int _moistureReading)
+{
+  objSoilM.publish(_moistureReading);
+  Serial.printf("Publishing Soil %i\n", _moistureReading);
+}
+
+void getDustSensorReadings()
+{
+  if (lowpulseoccupancy == 0)
+    lowpulseoccupancy = last_lpo;
+  else
+    last_lpo = lowpulseoccupancy;
+
+  // Serial.printlnf("LPO: %d", lowpulseoccupancy);
+  Serial.printlnf("Ratio: %f%%", ratio);
+  Serial.printlnf("Concentration: %f pcs/L", concentration);
+}
+
+String getAirQuality(int _aqSensor)
+{
+
+  int quality = aqSensor.slope();
+  airQual = aqSensor.getValue();
+  String qual = "None";
+
+  if (quality == AirQualitySensor::FORCE_SIGNAL)
+  {
+    qual = "Danger";
+  }
+  else if (quality == AirQualitySensor::HIGH_POLLUTION)
+  {
+    qual = "High Pollution";
+  }
+  else if (quality == AirQualitySensor::LOW_POLLUTION)
+  {
+    qual = "Low Pollution";
+  }
+  else if (quality == AirQualitySensor::FRESH_AIR)
+  {
+    qual = "Fresh Air";
+  }
+
+  return qual;
 }
 
 // Function to connect and reconnect as necessary to the MQTT server.
@@ -189,99 +305,34 @@ void MQTT_connect() {
        delay(5000);  // wait 5 seconds
   }
   Serial.printf("MQTT Connected!\n");
+}
 
+ void pumpON(int moistureReading, int buttonvalue){
 
+  Serial.printf("pump on\n");
+  if( moistureReading > 3446||buttonvalue);{
+    digitalWrite(pumpPin,HIGH);
+    startPumpTime=(millis());
+  }
+}
 
-  Serial.print("Sensor value: ");
-  Serial.println(sensor.getValue());
+void pumpOff(){
+  Serial.printf("pump off\n");
+  if (millis()-startPumpTime>2000) {
+    digitalWrite(pumpPin,LOW);
+  }
+}
   
-
-String quality = getAirQuality();
-Serial.printlnf("Air Quality: %s", quality.c_str());
-
-  duration = pulseIn(DUST_SENSOR_PIN, LOW);
-  lowpulseoccupancy = lowpulseoccupancy + duration;
-
-  if ((millis() - lastInterval) > SENSOR_READING_INTERVAL)
+void pingMQTT(){
+  // Ping MQTT Broker every 2 minutes to keep connection alive
+  if ((millis() - last) > 120000)
   {
- 
- }
-
-  val = analogRead(moistPin);
-  Serial.println(val);
-
-  DateTime = Time.timeStr(); // Current Date and Time from Particle Time class
-  TimeOnly = DateTime.substring(11, 19);
-
-  tempC = bmp.readTemperature();
-  tempF = (tempC * 9.0 / 5.0) + 32;
-
-
-  showTempDegree();
-
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.setTextSize(2);
-  display.setTextColor(WHITE);
-  display.printf("%s\n", TimeOnly.c_str());
-  display.display();
-  delay(2000);
-  display.clearDisplay();
+    Serial.printf("Pinging MQTT \n");
+    if (!mqtt.ping())
+    {
+      Serial.printf("Disconnecting \n");
+      mqtt.disconnect();
+    }
+    last = millis();
+  }
 }
-
-void showTempDegree(void)
-{
-
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setTextColor(WHITE);
-  display.setRotation(0);
-  display.setCursor(7, 9);
-  display.printf("%0.1f%c", tempF, DEGREE);
-  display.display();
-  delay(2000);
-  display.clearDisplay();
-}
-
-void getDustSensorReadings()
-{
-  if (lowpulseoccupancy == 0)
-    lowpulseoccupancy = last_lpo;
-  else
-    last_lpo = lowpulseoccupancy;
-
-// Serial.printlnf("LPO: %d", lowpulseoccupancy);
-Serial.printlnf("Ratio: %f%%", ratio);
-Serial.printlnf("Concentration: %f pcs/L", concentration);
-}
-
-String getAirQuality()
-{
- int quality = aqSensor.slope();
- String qual = "None";
-
-
-
- if (quality == AirQualitySensor::FORCE_SIGNAL)
- {
-   qual = "Danger";
- }
- else if (quality == AirQualitySensor::HIGH_POLLUTION)
- {
-   qual = "High Pollution";
- }
- else if (quality == AirQualitySensor::LOW_POLLUTION)
- {
-   qual = "Low Pollution";
- }
- else if (quality == AirQualitySensor::FRESH_AIR)
- {
-   qual = "Fresh Air";
- }
-
- return qual;
-
- }
-
-
-
