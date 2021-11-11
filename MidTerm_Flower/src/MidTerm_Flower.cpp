@@ -25,7 +25,7 @@
 void setup();
 void loop();
 void showTempDegree(void);
-void printMoisture(int _moistureReading);
+void showMoisture(int _moistureReading);
 void publishMoisture(int _moistureReading);
 String getAirQuality(int _aqSensor);
 void MQTT_connect();
@@ -209,6 +209,8 @@ void loop()
   display.setTextColor(WHITE);
   display.printf("%s\n", TimeOnly.c_str());
   display.display();
+  display.clearDisplay();
+  delay(3000);
 
   showTempDegree();
   
@@ -218,25 +220,25 @@ void showTempDegree(void)
 {
 
   
-  
+ 
   display.setTextSize(2);
+  display.setCursor(2, 2);
   display.setTextColor(WHITE);
   display.setRotation(0);
-  display.setCursor(2, 2);
   display.printf("%0.1f%c", tempF, DEGREE);
   display.display();
-
+ display.clearDisplay();
   
 }
 
-void printMoisture(int _moistureReading)
+void showMoisture(int _moistureReading)
 {
 
   display.clearDisplay();
+  display.setCursor(3, 3);
   display.setTextSize(2);
   display.setTextColor(WHITE);
   display.setRotation(0);
-  display.setCursor(3, 3);
   display.printf("Soil Moisture %i\n", _moistureReading);
   display.display();
   display.clearDisplay();
